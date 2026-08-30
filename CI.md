@@ -203,6 +203,29 @@ in there would serialise three checks that currently run in parallel. Fast feedb
 
 ---
 
+## How EAS finds these files
+
+There is no "publish workflows" step, and nothing about them is stored on EAS. The files
+live in this repo, and EAS learns they exist in exactly two ways:
+
+1. **A GitHub event fires** — needs the repo on GitHub _and_ Expo's GitHub App connected to
+   the project. This is the only way `pull_request`, `push` and `ref_delete` can ever
+   trigger, because otherwise EAS never hears about your commits.
+2. **`eas workflow:run <file>`** — packages the local project directory, uploads it, and runs
+   it immediately. Works with no GitHub connection at all.
+
+The dashboard's Workflows tab lists _runs_, not workflow definitions. On a fresh project with
+neither of the above, it is empty — which looks like "EAS can't find my workflows" but is
+just an empty run history.
+
+```bash
+eas workflow:run .eas/workflows/pr-checks.yml   # populate it in ~2 minutes
+eas workflow:runs                                # list runs
+eas workflow:logs <job-id>                       # per-step logs
+```
+
+---
+
 ## What the real validator changed
 
 Every file here was written from the documentation and then validated against the live EAS
@@ -222,13 +245,17 @@ validator taught, so those four mistakes cannot come back.
 
 ### One thing that is not a syntax error
 
-`type: maestro` jobs validate, but fail with:
+`type: maestro` jobs validate, but then fail an entitlement check:
 
 > Running maestro_test jobs requires a paid plan.
 
 That gate applies to `pr-e2e.yml`, `main.yml`, `release.yml` and `nightly.yml`. The rest of
 each of those files is schema-clean — verified by re-validating them with the Maestro jobs
 stripped out. On a free account, comment those jobs out or move the flows to `maestro-cloud`.
+
+This distinction matters in CI: the `Schema` step in `pr-checks.yml` treats "requires a paid
+plan" as a pass and everything else as a failure. A billing state should not read as a broken
+workflow — but a genuine schema error still fails the job.
 
 ---
 
