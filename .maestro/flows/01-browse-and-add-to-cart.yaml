@@ -1,0 +1,48 @@
+# Journey 1 — the catalogue loads on a real device and the basket adds up.
+# This is the smoke test: if it fails, the build is broken.
+appId: com.example.brewline
+tags:
+  - smoke
+---
+- launchApp:
+    clearState: true
+
+- assertVisible: "This week's roasts"
+- assertVisible: 'Ethiopia Guji'
+- assertVisible: '£14.00'
+- assertVisible: '10% off 3+ bags'
+
+# The basket bar only exists once something is in the basket.
+- assertNotVisible:
+    id: 'view-basket'
+
+- tapOn:
+    id: 'add-ethiopia-guji'
+- assertVisible:
+    id: 'view-basket'
+    text: 'View basket (1)'
+
+- tapOn:
+    id: 'add-ethiopia-guji'
+- tapOn:
+    id: 'add-ethiopia-guji'
+- assertVisible:
+    id: 'view-basket'
+    text: 'View basket (3)'
+
+- tapOn:
+    id: 'view-basket'
+
+# 3 x £14.00 = £42.00, less the 10% bulk rule = £37.80, which clears the
+# £35 free-delivery threshold.
+- assertVisible:
+    id: 'cart-line-ethiopia-guji-bulk'
+- assertVisible:
+    id: 'total-goods'
+    text: '£37.80'
+- assertVisible:
+    id: 'total-shipping'
+    text: 'Free'
+- assertVisible:
+    id: 'total-due'
+    text: '£45.36'

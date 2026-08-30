@@ -1,0 +1,107 @@
+name: Rollout
+
+# Ramp, hold, or reverse a production OTA rollout.
+#
+#   eas workflow:run .eas/workflows/rollout.yml \
+#     -F update_group_id=<id> -F action=ramp -F percentage=25
+#
+# The update group id comes from the Slack message release.yml posts. That
+# copy-paste is a real weakness worth naming: EAS Workflows has no cross-workflow
+# state, so release.yml cannot hand this workflow its outputs.
+#
+# WHY THE FAN-OUT BELOW
+# `rollout_percentage` is typed as a number and is validated BEFORE
+# interpolation, so `rollout_percentage: ${{ inputs.percentage }}` is rejected by
+# the schema no matter how the input is declared — verified against
+# `eas workflow:validate` with both a `number` and a `choice` input. The only way
+# to drive the percentage from a dispatch input is one job per literal value,
+# selected with `if:`. Verbose, but it is the shape the platform allows.
+on:
+  workflow_dispatch:
+    inputs:
+      update_group_id:
+        type: string
+        required: true
+        description: 'Update group to act on (from the release announcement)'
+      action:
+        type: choice
+        required: true
+        description: 'What to do with the rollout'
+        options:
+          - ramp
+          - rollback
+      percentage:
+        type: choice
+        required: true
+        description: 'Target percentage (ignored for rollback)'
+        options: ['10', '25', '50', '100']
+
+jobs:
+  # Small ramps are routine. Crossing into majority-of-users territory is not.
+  # Dispatch inputs arrive as strings, hence the quoted comparison.
+  approve_wide_rollout:
+    name: Approve wide rollout
+    if: ${{ inputs.action == 'ramp' && (inputs.percentage == '50' || inputs.percentage == '100') }}
+    type: require-approval
+
+  ramp_10:
+    name: Ramp to 10%
+    if: ${{ inputs.action == 'ramp' && inputs.percentage == '10' }}
+    type: update-rollout
+    params:
+      update_group_id: ${{ inputs.update_group_id }}
+      rollout_percentage: 10
+
+  ramp_25:
+    name: Ramp to 25%
+    if: ${{ inputs.action == 'ramp' && inputs.percentage == '25' }}
+    type: update-rollout
+    params:
+      update_group_id: ${{ inputs.update_group_id }}
+      rollout_percentage: 25
+
+  ramp_50:
+    name: Ramp to 50%
+    needs: [approve_wide_rollout]
+    if: ${{ inputs.action == 'ramp' && inputs.percentage == '50' }}
+    type: update-rollout
+    params:
+      update_group_id: ${{ inputs.update_group_id }}
+      rollout_percentage: 50
+
+  ramp_100:
+    name: Ramp to 100%
+    needs: [approve_wide_rollout]
+    if: ${{ inputs.action == 'ramp' && inputs.percentage == '100' }}
+    type: update-rollout
+    params:
+      update_group_id: ${{ inputs.update_group_id }}
+      rollout_percentage: 100
+
+  # The only real kill switch in the whole pipeline. If the bad change is JS,
+  # this reverses it in minutes. If the bad change is NATIVE, nothing here helps:
+  # you halt the Play staged rollout by hand, and an App Store binary cannot be
+  # recalled at all.
+  rollback:
+    name: Roll back to 0%
+    if: ${{ inputs.action == 'rollback' }}
+    type: update-rollout
+    params:
+      update_group_id: ${{ inputs.update_group_id }}
+      rollout_percentage: 0
+
+  summary:
+    name: Summary
+    after: [ramp_10, ramp_25, ramp_50, ramp_100, rollback]
+    type: doc
+    params:
+      md: |
+        ## Rollout
+
+        - Update group: `${{ inputs.update_group_id }}`
+        - Action: **${{ inputs.action }}**
+        - Target: **${{ inputs.percentage }}%**
+
+        A rollout at 0% is halted, not deleted. To replace a bad update entirely,
+        publish a new one from the last-known-good commit — reverting the rollout
+        only stops further delivery.

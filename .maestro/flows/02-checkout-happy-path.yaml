@@ -1,0 +1,54 @@
+# Journey 2 — the one that takes money. Catalogue -> basket -> pay -> confirmation.
+appId: com.example.brewline
+tags:
+  - smoke
+  - critical
+---
+- launchApp:
+    clearState: true
+
+- runFlow: ../subflows/add-two-espressos.yaml
+
+# £19.00 goods + £4.99 delivery + £3.80 VAT
+- assertVisible:
+    id: 'total-due'
+    text: '£27.79'
+- tapOn:
+    id: 'go-to-checkout'
+
+- assertVisible:
+    id: 'checkout-total'
+    text: '£27.79'
+
+- tapOn:
+    id: 'field-name'
+- inputText: 'Karim M'
+- tapOn:
+    id: 'field-email'
+- inputText: 'karim@example.com'
+- tapOn:
+    id: 'field-card'
+- inputText: '4242424242424242'
+- tapOn:
+    id: 'field-expiry'
+- inputText: '1230'
+- tapOn:
+    id: 'field-cvc'
+- inputText: '123'
+- hideKeyboard
+
+- tapOn:
+    id: 'pay-button'
+
+- assertVisible:
+    id: 'order-confirmed'
+- assertVisible:
+    id: 'order-total'
+    text: 'Paid £27.79'
+- assertVisible: 'karim@example.com'
+
+# The basket must be empty afterwards — a double charge starts here.
+- tapOn:
+    id: 'back-to-shop'
+- assertNotVisible:
+    id: 'view-basket'

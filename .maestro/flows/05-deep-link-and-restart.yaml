@@ -1,0 +1,27 @@
+# Journey 5 — things only a device can tell you: does a deep link open the right
+# screen, and does the basket survive the app being backgrounded and reopened?
+appId: com.example.brewline
+tags:
+  - critical
+---
+- launchApp:
+    clearState: true
+
+- runFlow: ../subflows/add-two-espressos.yaml
+- assertVisible:
+    id: 'total-due'
+    text: '£27.79'
+
+# Background the app and bring it back.
+- pressKey: Home
+- launchApp:
+    clearState: false
+- assertVisible:
+    id: 'total-due'
+    text: '£27.79'
+
+# A deep link straight to checkout must land on checkout, not the catalogue.
+- openLink: 'brewline://checkout'
+- assertVisible:
+    id: 'checkout-total'
+    text: '£27.79'

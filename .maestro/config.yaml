@@ -1,0 +1,9 @@
+# Maestro workspace config. `maestro test .maestro` (and the EAS Maestro job)
+# picks this up automatically.
+flows:
+  - 'flows/*.yaml'
+
+# Fail the run on the first broken journey — these are the flows that must never
+# break, so there is no value in pressing on.
+executionOrder:
+  continueOnFailure: false

@@ -1,0 +1,48 @@
+# Journey 4 — promo codes, end to end: a rejected code, then a valid one that
+# changes the total, then removing it.
+appId: com.example.brewline
+tags:
+  - critical
+---
+- launchApp:
+    clearState: true
+
+- runFlow: ../subflows/add-two-espressos.yaml
+
+- tapOn:
+    id: 'promo-input'
+- inputText: 'NOPE'
+- hideKeyboard
+- tapOn:
+    id: 'apply-promo'
+- assertVisible:
+    id: 'promo-error'
+- assertNotVisible:
+    id: 'total-promo'
+
+- tapOn:
+    id: 'promo-input'
+- eraseText
+- inputText: 'brew10'
+- hideKeyboard
+- tapOn:
+    id: 'apply-promo'
+
+# Lower-case in, normalised code out — and 10% off £19.00.
+- assertVisible:
+    id: 'applied-promo'
+    text: 'BREW10 applied'
+- assertVisible:
+    id: 'total-promo'
+    text: '−£1.90'
+- assertVisible:
+    id: 'total-due'
+    text: '£25.51'
+
+- tapOn:
+    id: 'remove-promo'
+- assertVisible:
+    id: 'promo-input'
+- assertVisible:
+    id: 'total-due'
+    text: '£27.79'

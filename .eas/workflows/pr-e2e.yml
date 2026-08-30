@@ -1,0 +1,229 @@
+name: PR end-to-end
+
+# The expensive lane, and the interesting one.
+#
+# THE IDEA -----------------------------------------------------------------
+# Most PRs change only JavaScript. Rebuilding the native app for those is 20+
+# minutes of nothing. So: fingerprint the native layer, look for a build that
+# already matches that fingerprint, and if one exists, `repack` it — swap in the
+# freshly-bundled JS without touching Gradle or Xcode. Expo's published numbers
+# for this are 23 min -> 5 min.
+#
+# INVARIANT 1: a matched build is a NATIVE SHELL, never a testable artifact.
+# In this repo the `e2e` and `preview` profiles differ only in EXPO_PUBLIC_* env
+# and channel — both of which live in the JS bundle, not the native layer — so
+# they produce the SAME fingerprint hash. Matching on the hash alone could hand
+# this lane a `preview` binary pointed at the real API, and the E2E suite would
+# silently test the wrong thing. Two defences, both mandatory:
+#   1. constrain get-build on profile + channel + distribution (+ simulator), and
+#   2. ALWAYS repack a match rather than testing it directly, so the bundle and
+#      its env are re-baked for this profile.
+# Never wire a maestro job straight to a get-build result.
+#
+# Opt-in per PR by adding the `e2e` label. Note this is `pull_request_labeled`,
+# a trigger of its own — `on.pull_request` has no `labels:` filter.
+on:
+  pull_request_labeled:
+    labels: [e2e]
+  workflow_dispatch: {}
+
+# Deliberately NO `cancel_in_progress` here, unlike pr-checks.yml. A 25-minute
+# labelled E2E run should not be cancelled and re-queued because someone pushed
+# a README typo. That difference in concurrency policy is the reason these are
+# two files rather than one.
+
+defaults:
+  image: sdk-57
+
+jobs:
+  fingerprint:
+    name: Fingerprint the native layer
+    type: fingerprint
+    # Must match the build profile's environment, or the hash is computed
+    # against a different set of variables than the build will use.
+    environment: preview
+    # NOTE: this job type only works on CNG projects. If android/ or ios/ are
+    # ever committed to this repo, this whole pipeline stops working.
+
+  # ---------------------------------------------------------------- Android
+
+  get_android:
+    name: Look for a reusable Android shell
+    needs: [fingerprint]
+    type: get-build
+    params:
+      platform: android
+      profile: e2e
+      channel: e2e
+      distribution: internal
+      fingerprint_hash: ${{ needs.fingerprint.outputs.android_fingerprint_hash }}
+      # If an identical build is already running, wait for it instead of racing
+      # it into a duplicate.
+      wait_for_in_progress: true
+
+  repack_android:
+    name: Repack Android (no native rebuild)
+    needs: [get_android]
+    if: ${{ needs.get_android.outputs.build_id }}
+    type: repack
+    params:
+      build_id: ${{ needs.get_android.outputs.build_id }}
+      profile: e2e
+      js_bundle_only: true
+      message: 'Repack for PR E2E'
+
+  build_android:
+    name: Build Android (fingerprint miss)
+    # `after:` not `needs:` — if get-build hard-fails rather than returning
+    # empty outputs, we still want a build rather than a stalled graph.
+    after: [get_android]
+    if: ${{ !after.get_android.outputs.build_id }}
+    type: build
+    params:
+      platform: android
+      profile: e2e
+
+  resolve_android:
+    name: Resolve Android artifact
+    # THE JOIN. Exactly one of repack/build runs; the other is SKIPPED. A
+    # skipped job never "succeeds", so `needs: [repack, build]` on the maestro
+    # job would deadlock by construction. `after:` is the only edge that
+    # survives a skipped upstream.
+    #
+    # Rather than let every downstream job carry a coalescing expression, this
+    # tiny job collapses the fork back into a single value. Downstream then uses
+    # an ordinary `needs:` edge — a hard success gate — and a fork that produced
+    # nothing fails loudly here instead of dispatching maestro with build_id: "".
+    after: [get_android, repack_android, build_android]
+    outputs:
+      build_id: ${{ steps.pick.outputs.build_id }}
+      source: ${{ steps.pick.outputs.source }}
+    env:
+      # Interpolated at dispatch (phase one). `after.<id>.outputs` is documented;
+      # note that Expo's own blog example declares `after:` and then reads
+      # `needs.*` — one of the two is a doc slip. If this resolves empty on the
+      # first real run, switch these two lines to `needs.*` and nothing else
+      # changes. That is the point of funnelling it through one job.
+      REPACKED_BUILD_ID: ${{ after.repack_android.outputs.build_id }}
+      NATIVE_BUILD_ID: ${{ after.build_android.outputs.build_id }}
+    steps:
+      - id: pick
+        name: Pick whichever branch produced an artifact
+        run: |
+          if [ -n "$REPACKED_BUILD_ID" ]; then
+            echo "Reused a native shell and repacked the JS bundle."
+            set-output build_id "$REPACKED_BUILD_ID"
+            set-output source "repack"
+          elif [ -n "$NATIVE_BUILD_ID" ]; then
+            echo "Fingerprint miss — built natively."
+            set-output build_id "$NATIVE_BUILD_ID"
+            set-output source "build"
+          else
+            echo "Neither repack nor build produced an artifact." >&2
+            exit 1
+          fi
+
+  maestro_android:
+    name: Maestro on Android
+    needs: [resolve_android]
+    type: maestro
+    environment: preview
+    # An Android emulator needs a nested-virtualization worker; a plain
+    # linux-medium cannot start one.
+    runs_on: linux-large-nested-virtualization
+    params:
+      build_id: ${{ needs.resolve_android.outputs.build_id }}
+      flow_path: ['.maestro/flows']
+      shards: 2
+      # There are no job timeouts in EAS Workflows, so a wedged emulator has no
+      # ceiling. Retries are the only lever the platform gives us, and retrying
+      # only the failed flows keeps the cost of one flake proportionate.
+      retries: 1
+      retry_failed_only: true
+      record_screen: true
+
+  # -------------------------------------------------------------------- iOS
+
+  get_ios:
+    name: Look for a reusable iOS shell
+    needs: [fingerprint]
+    type: get-build
+    params:
+      platform: ios
+      profile: e2e
+      channel: e2e
+      distribution: internal
+      simulator: true
+      fingerprint_hash: ${{ needs.fingerprint.outputs.ios_fingerprint_hash }}
+      wait_for_in_progress: true
+
+  repack_ios:
+    name: Repack iOS (no native rebuild)
+    needs: [get_ios]
+    if: ${{ needs.get_ios.outputs.build_id }}
+    type: repack
+    params:
+      build_id: ${{ needs.get_ios.outputs.build_id }}
+      profile: e2e
+      js_bundle_only: true
+      message: 'Repack for PR E2E'
+
+  build_ios:
+    name: Build iOS simulator (fingerprint miss)
+    after: [get_ios]
+    if: ${{ !after.get_ios.outputs.build_id }}
+    type: build
+    params:
+      platform: ios
+      profile: e2e
+
+  resolve_ios:
+    name: Resolve iOS artifact
+    after: [get_ios, repack_ios, build_ios]
+    outputs:
+      build_id: ${{ steps.pick.outputs.build_id }}
+      source: ${{ steps.pick.outputs.source }}
+    env:
+      REPACKED_BUILD_ID: ${{ after.repack_ios.outputs.build_id }}
+      NATIVE_BUILD_ID: ${{ after.build_ios.outputs.build_id }}
+    steps:
+      - id: pick
+        name: Pick whichever branch produced an artifact
+        run: |
+          if [ -n "$REPACKED_BUILD_ID" ]; then
+            set-output build_id "$REPACKED_BUILD_ID"
+            set-output source "repack"
+          elif [ -n "$NATIVE_BUILD_ID" ]; then
+            set-output build_id "$NATIVE_BUILD_ID"
+            set-output source "build"
+          else
+            echo "Neither repack nor build produced an artifact." >&2
+            exit 1
+          fi
+
+  maestro_ios:
+    name: Maestro on iOS
+    needs: [resolve_ios]
+    type: maestro
+    environment: preview
+    # An iOS simulator can only run on a macOS worker.
+    runs_on: macos-large
+    params:
+      build_id: ${{ needs.resolve_ios.outputs.build_id }}
+      flow_path: ['.maestro/flows']
+      shards: 2
+      retries: 1
+      retry_failed_only: true
+      record_screen: true
+
+  # ------------------------------------------------------------------ report
+
+  report:
+    name: Report to PR
+    after: [maestro_android, maestro_ios, resolve_android, resolve_ios]
+    type: github-comment
+    params:
+      message: |
+        End-to-end run complete.
+        Android artifact came from: ${{ after.resolve_android.outputs.source }}
+        iOS artifact came from: ${{ after.resolve_ios.outputs.source }}

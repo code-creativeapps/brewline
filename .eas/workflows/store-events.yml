@@ -1,0 +1,45 @@
+name: Store events
+
+# Most pipelines only ever react to git. This one also reacts to App Store
+# Connect: the `app_store_connect` trigger fires on store-side state changes, so
+# the moment Apple moves a version to "in review", "rejected" or "ready for
+# distribution", the team hears about it without anyone refreshing a browser tab.
+#
+# All filter values are lowercase and case-sensitive.
+on:
+  app_store_connect:
+    app_version:
+      states:
+        - waiting_for_review
+        - in_review
+        - rejected
+        - metadata_rejected
+        - invalid_binary
+        - pending_developer_release
+        - ready_for_distribution
+    external_beta:
+      states:
+        - beta_approved
+        - beta_rejected
+
+jobs:
+  announce:
+    name: Announce store state change
+    # NOTE: there is no `type: slack` job. Slack is a STEP function
+    # (eas/send_slack_message) inside a custom job — verified against
+    # `eas workflow:validate`.
+    steps:
+      - uses: eas/send_slack_message
+        with:
+          slack_hook_url: ${{ env.SLACK_WEBHOOK_URL }}
+          message: |
+            App Store Connect state changed for Brewline.
+            Build upload: ${{ app_store_connect.build_upload.id }}
+
+  # A rejection is the one state that needs a person to pick it up rather than
+  # just read it, so it gets its own job that shows in the run graph as
+  # "action required" rather than scrolling past in a channel.
+  acknowledge_rejection:
+    name: Acknowledge rejection
+    needs: [announce]
+    type: require-approval

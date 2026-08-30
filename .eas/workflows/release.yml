@@ -1,0 +1,180 @@
+name: Release
+
+# The store lane. Triggered by a version tag, e.g. `git tag v1.2.0 && git push --tags`.
+#
+# THE FORK
+# A fingerprint match means nothing native changed, so the release can ship as an
+# over-the-air update — minutes, no store review. A miss means a real native
+# build, which then has to go through the stores.
+#
+# INVARIANT 2: NEVER repack on this lane.
+# `production` uses appVersionSource: remote + autoIncrement. Repack does not
+# mint a new build number, so a repacked artifact would carry a duplicate
+# versionCode / CFBundleVersion that Play and App Store Connect reject outright —
+# and repacking a distribution build invalidates its signing. Repack belongs to
+# the PR and preview lanes only. The store lane always builds fresh.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch: {}
+
+defaults:
+  image: sdk-57
+
+jobs:
+  unit_tests:
+    name: Jest
+    steps:
+      - uses: ./.eas/functions/setup
+      - run: npm run test:ci
+
+  fingerprint:
+    name: Fingerprint the native layer
+    needs: [unit_tests]
+    type: fingerprint
+    environment: production
+
+  # ------------------------------------------------- does a native build exist?
+
+  get_android:
+    name: Check for a matching Android release build
+    needs: [fingerprint]
+    type: get-build
+    params:
+      platform: android
+      profile: production
+      channel: production
+      distribution: store
+      fingerprint_hash: ${{ needs.fingerprint.outputs.android_fingerprint_hash }}
+
+  get_ios:
+    name: Check for a matching iOS release build
+    needs: [fingerprint]
+    type: get-build
+    params:
+      platform: ios
+      profile: production
+      channel: production
+      distribution: store
+      fingerprint_hash: ${{ needs.fingerprint.outputs.ios_fingerprint_hash }}
+
+  # ------------------------------------------------------- PATH A: OTA update
+  #
+  # The gate matters MORE here than on the native path, which is counter-
+  # intuitive enough to be worth stating plainly: an OTA reaches 100% of users
+  # in minutes, has no store review acting as an accidental safety net, and is
+  # the path with the LEAST testing — we skipped the build precisely because
+  # nothing native changed, so we skipped the release smoke run too.
+
+  approve_ota:
+    name: Approve production OTA
+    needs: [get_android, get_ios]
+    if: ${{ needs.get_android.outputs.build_id && needs.get_ios.outputs.build_id }}
+    type: require-approval
+
+  publish_production_update:
+    name: Publish production update
+    needs: [approve_ota]
+    type: update
+    environment: production
+    params:
+      channel: production
+      platform: all
+      message: 'Release ${{ github.ref_name }}'
+      # Ship to a slice first. The ramp is driven by rollout.yml.
+      rollout_percentage: 10
+      upload_sentry_sourcemaps: true
+
+  # ---------------------------------------------------- PATH B: native release
+
+  build_android:
+    name: Build Android release
+    after: [get_android]
+    if: ${{ !after.get_android.outputs.build_id }}
+    type: build
+    params:
+      platform: android
+      profile: production
+      message: 'Release ${{ github.ref_name }}'
+
+  build_ios:
+    name: Build iOS release
+    after: [get_ios]
+    if: ${{ !after.get_ios.outputs.build_id }}
+    type: build
+    params:
+      platform: ios
+      profile: production
+      message: 'Release ${{ github.ref_name }}'
+
+  # Smoke the release-signed, minified binary — not a debug build. This is the
+  # only check that can tell you minification or production signing broke the
+  # app. It uses the production-e2e profile: production build settings with the
+  # in-memory API, so the smoke run never posts a real payment.
+  release_smoke:
+    name: Smoke the release build
+    needs: [build_android]
+    type: maestro
+    environment: production
+    runs_on: linux-large-nested-virtualization
+    params:
+      build_id: ${{ needs.build_android.outputs.build_id }}
+      flow_path: ['.maestro/flows']
+      include_tags: [smoke, critical]
+      retries: 1
+      retry_failed_only: true
+
+  # The gate sits AFTER the build and the smoke run, and BEFORE submission.
+  #   - A human approving with no artifact and no test results is rubber-
+  #     stamping. After the build, their information set is "here is a signed
+  #     binary that passed the critical flows" instead of "someone pushed a tag".
+  #   - The gate belongs at the one-way door. Being wrong before a build costs
+  #     ~20 build-minutes; being wrong after submission costs a store review
+  #     cycle you cannot recall.
+  approve_release:
+    name: Approve store submission
+    needs: [release_smoke, build_ios]
+    type: require-approval
+
+  submit_android:
+    name: Submit to Play
+    needs: [approve_release, build_android]
+    type: submit
+    params:
+      build_id: ${{ needs.build_android.outputs.build_id }}
+      # Staged at 10% — see eas.json submit.production.android.rollout. A native
+      # release cannot be recalled, so the staged rollout plus the OTA kill
+      # switch IS the rollback story.
+      profile: production
+
+  testflight_ios:
+    name: Distribute to TestFlight
+    needs: [approve_release, build_ios]
+    type: testflight
+    params:
+      build_id: ${{ needs.build_ios.outputs.build_id }}
+      profile: production
+      # Internal only, and deliberately NOT gated behind a second approval:
+      # internal distribution is reversible with a small blast radius, and
+      # gating it destroys the "get it to QA fast" property. External beta and
+      # Play production are the steps that need a human.
+      internal_groups: ['Brewline Internal']
+      changelog: 'Release ${{ github.ref_name }}'
+      submit_beta_review: false
+
+  # ----------------------------------------------------------------- announce
+
+  notify:
+    name: Announce the release
+    after:
+      [publish_production_update, submit_android, testflight_ios]
+    # NOTE: there is no `type: slack` job. Slack is a STEP function
+    # (eas/send_slack_message) inside a custom job — verified against
+    # `eas workflow:validate`.
+    steps:
+      - uses: eas/send_slack_message
+        with:
+          slack_hook_url: ${{ env.SLACK_WEBHOOK_URL }}
+          message: |
+            Brewline ${{ github.ref_name }}
+            Update group (needed for ramp/rollback): ${{ after.publish_production_update.outputs.first_update_group_id }}

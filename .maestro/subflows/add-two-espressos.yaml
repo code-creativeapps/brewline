@@ -1,0 +1,13 @@
+# Reusable setup: a basket worth £19.00 (2 x House Espresso).
+appId: com.example.brewline
+---
+- assertVisible: 'House Espresso'
+- tapOn:
+    id: 'add-house-espresso'
+- tapOn:
+    id: 'add-house-espresso'
+- assertVisible:
+    id: 'product-house-espresso-in-cart'
+    text: '2 in basket'
+- tapOn:
+    id: 'view-basket'

@@ -1,0 +1,47 @@
+name: Setup
+description: >-
+  Checkout, restore the dependency cache, install, and save the cache. Custom
+  functions are the ONLY reuse mechanism EAS Workflows offers — there is no
+  workflow_call and no reusable workflows — so this is the single unit of shared
+  setup across every custom job in the pipeline.
+
+  Deliberately scoped to setup only. Typecheck, lint and Jest could live here
+  too, but a custom function runs as a sequence of steps *inside one job*, so
+  folding them in would serialise three checks that currently run in parallel.
+  Fast feedback beats DRY: we duplicate three short job declarations instead.
+
+# NOTE: function inputs accept name / type / default_value / allowed_values /
+# required. A `description` key is REJECTED by the schema — verified against
+# `eas workflow:validate`, not assumed.
+inputs:
+  - name: node_modules_cache_key_files
+    type: string
+    default_value: package-lock.json
+
+outputs:
+  cache_key:
+    value: '${{ steps.compute_key.outputs.cache_key }}'
+
+runs:
+  steps:
+    - uses: eas/checkout
+
+    - id: compute_key
+      name: Compute cache key
+      # hashFiles is only available in the steps context, never at workflow level.
+      run: set-output cache_key "node-modules-${{ hashFiles(inputs.node_modules_cache_key_files) }}"
+
+    - uses: eas/restore_cache
+      with:
+        key: ${{ steps.compute_key.outputs.cache_key }}
+        path: node_modules
+        # Falls back to the most recent partial match, so a lockfile bump still
+        # gets a warm-ish cache rather than a cold install.
+        restore_keys: node-modules-
+
+    - uses: eas/install_node_modules
+
+    - uses: eas/save_cache
+      with:
+        key: ${{ steps.compute_key.outputs.cache_key }}
+        path: node_modules

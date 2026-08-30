@@ -1,0 +1,112 @@
+name: Main
+
+# The inner loop. Every merge to main must (a) stay green, (b) prove itself on a
+# device, and (c) reach the team as an installable preview.
+#
+# Without this file the pipeline would jump straight from "PR merged" to "tag
+# pushed", and nothing would continuously verify main. That gap is the first
+# thing a reviewer notices.
+on:
+  push:
+    branches: [main]
+    paths:
+      - '!**/*.md'
+
+concurrency:
+  cancel_in_progress: true
+  group: ${{ workflow.filename }}-${{ github.ref }}
+
+defaults:
+  image: sdk-57
+
+jobs:
+  unit_tests:
+    name: Jest
+    steps:
+      - uses: ./.eas/functions/setup
+      - run: npm run test:ci
+
+  fingerprint:
+    name: Fingerprint the native layer
+    needs: [unit_tests]
+    type: fingerprint
+    environment: preview
+
+  get_android:
+    name: Look for a reusable Android shell
+    needs: [fingerprint]
+    type: get-build
+    params:
+      platform: android
+      profile: preview
+      channel: preview
+      distribution: internal
+      fingerprint_hash: ${{ needs.fingerprint.outputs.android_fingerprint_hash }}
+      wait_for_in_progress: true
+
+  repack_android:
+    name: Repack Android
+    needs: [get_android]
+    if: ${{ needs.get_android.outputs.build_id }}
+    type: repack
+    params:
+      build_id: ${{ needs.get_android.outputs.build_id }}
+      profile: preview
+      js_bundle_only: true
+
+  build_android:
+    name: Build Android
+    after: [get_android]
+    if: ${{ !after.get_android.outputs.build_id }}
+    type: build
+    params:
+      platform: android
+      profile: preview
+
+  resolve_android:
+    name: Resolve Android artifact
+    after: [get_android, repack_android, build_android]
+    outputs:
+      build_id: ${{ steps.pick.outputs.build_id }}
+    env:
+      REPACKED_BUILD_ID: ${{ after.repack_android.outputs.build_id }}
+      NATIVE_BUILD_ID: ${{ after.build_android.outputs.build_id }}
+    steps:
+      - id: pick
+        run: |
+          if [ -n "$REPACKED_BUILD_ID" ]; then
+            set-output build_id "$REPACKED_BUILD_ID"
+          elif [ -n "$NATIVE_BUILD_ID" ]; then
+            set-output build_id "$NATIVE_BUILD_ID"
+          else
+            echo "No artifact produced." >&2
+            exit 1
+          fi
+
+  smoke:
+    name: Maestro smoke
+    needs: [resolve_android]
+    type: maestro
+    environment: preview
+    runs_on: linux-large-nested-virtualization
+    params:
+      build_id: ${{ needs.resolve_android.outputs.build_id }}
+      flow_path: ['.maestro/flows']
+      # Only the flows tagged `smoke` on every merge. The full five-flow suite
+      # runs on the labelled PR lane and again nightly. Android only here for
+      # the same reason: main merges are frequent, and a macOS worker for every
+      # one of them buys little that the nightly cold run does not.
+      include_tags: [smoke]
+      retries: 1
+      retry_failed_only: true
+
+  publish_preview_update:
+    name: Publish preview update
+    needs: [smoke]
+    type: update
+    environment: preview
+    params:
+      channel: preview
+      platform: all
+      message: 'main@${{ github.sha }}'
+      upload_sentry_sourcemaps: true

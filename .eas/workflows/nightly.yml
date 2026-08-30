@@ -1,0 +1,93 @@
+name: Nightly
+
+# The antidote to two blind spots that no amount of YAML can fix.
+#
+# 1. STALE SHELLS. `get-build` has no max-age parameter, so a three-week-old
+#    match — different builder image, different Xcode/NDK — cannot be filtered
+#    out declaratively. An unconditional cold build every night keeps the newest
+#    match under ~24 hours old, which is the closest thing to a max-age we have.
+#
+# 2. FINGERPRINT BLIND SPOTS. The PR lane trades native-build coverage for cycle
+#    time: when the fingerprint matches, Gradle and Xcode never run, so a break
+#    in native config resolution, R8/ProGuard, or a transitive native dependency
+#    would go unnoticed. This buys that coverage back somewhere latency does not
+#    matter.
+#
+# Scheduled workflows only run on the default branch, run in GMT, may be delayed
+# under load, and in rare cases may be skipped or run twice.
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch: {}
+
+defaults:
+  image: sdk-57
+
+jobs:
+  audit:
+    name: Dependency and project health
+    steps:
+      - uses: ./.eas/functions/setup
+      - name: npm audit
+        run: npm audit --audit-level=high
+      - name: expo-doctor
+        run: npx expo-doctor
+
+  # No fingerprint, no get-build, no repack. That is the entire point: this lane
+  # deliberately refuses the optimisation the rest of the pipeline depends on.
+  cold_build_android:
+    name: Cold build Android
+    type: build
+    params:
+      platform: android
+      profile: e2e
+      message: 'Nightly cold build'
+
+  cold_build_ios:
+    name: Cold build iOS
+    type: build
+    params:
+      platform: ios
+      profile: e2e
+      message: 'Nightly cold build'
+
+  maestro_android:
+    name: Full Maestro suite (Android)
+    needs: [cold_build_android]
+    type: maestro
+    environment: preview
+    runs_on: linux-large-nested-virtualization
+    params:
+      build_id: ${{ needs.cold_build_android.outputs.build_id }}
+      # No include_tags — every flow, every night.
+      flow_path: ['.maestro/flows']
+      retries: 1
+      retry_failed_only: true
+      record_screen: true
+
+  maestro_ios:
+    name: Full Maestro suite (iOS)
+    needs: [cold_build_ios]
+    type: maestro
+    environment: preview
+    runs_on: macos-large
+    params:
+      build_id: ${{ needs.cold_build_ios.outputs.build_id }}
+      flow_path: ['.maestro/flows']
+      retries: 1
+      retry_failed_only: true
+      record_screen: true
+
+  notify:
+    name: Report failures
+    after: [audit, maestro_android, maestro_ios]
+    if: ${{ failure() }}
+    # NOTE: there is no `type: slack` job. Slack is a STEP function
+    # (eas/send_slack_message) inside a custom job — verified against
+    # `eas workflow:validate`.
+    steps:
+      - uses: eas/send_slack_message
+        with:
+          slack_hook_url: ${{ env.SLACK_WEBHOOK_URL }}
+          message: |
+            Nightly failed on main — cold build or full E2E suite is red.

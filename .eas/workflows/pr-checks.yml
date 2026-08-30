@@ -1,0 +1,98 @@
+name: PR checks
+
+# The fast gate — everything that needs no device, no emulator and no build.
+# Target is under three minutes; this is what blocks a merge.
+#
+# `base_ref_changed` is the one trigger type worth calling out: it fires when the
+# PR's base branch moves underneath the branch, so a PR that was green against an
+# older `main` is re-verified against the current one. It is the closest thing
+# EAS Workflows has to "re-check after a rebase".
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - base_ref_changed
+    paths:
+      - '!**/*.md'
+
+concurrency:
+  # Every new push to a PR should cancel the run it supersedes — nobody cares
+  # about the result of a commit that has already been replaced.
+  cancel_in_progress: true
+  # NOTE: custom concurrency groups are not supported yet. Expo documents this
+  # value as a forward-compatibility placeholder, so it does nothing today.
+  group: ${{ workflow.filename }}-${{ github.ref }}
+
+defaults:
+  image: sdk-57
+
+jobs:
+  # The three checks are siblings with no `needs:`, so they run in parallel.
+  # There is no matrix strategy in EAS Workflows; parallelism is expressed by
+  # writing sibling jobs.
+  typecheck:
+    name: TypeScript
+    steps:
+      - uses: ./.eas/functions/setup
+      - name: tsc --noEmit
+        run: npm run typecheck
+
+  lint:
+    name: ESLint
+    steps:
+      - uses: ./.eas/functions/setup
+      - name: eslint
+        run: npm run lint
+
+  unit_tests:
+    name: Jest
+    steps:
+      - uses: ./.eas/functions/setup
+      - name: jest
+        run: npm run test:ci
+      - uses: eas/upload_artifact
+        # Upload the report even when the tests failed — that is the run where
+        # somebody actually wants to read it.
+        if: ${{ always() }}
+        with:
+          # `type: other` is required in a custom job. The application-archive
+          # and build-artifact types are reserved for build jobs and error out.
+          type: other
+          name: jest-report
+          path: |
+            coverage/**/*
+
+  # Validate the pipeline with the pipeline. An earlier version of these files
+  # shipped an invalid `on.pull_request.labels` key that no test could catch —
+  # only the schema validator would have.
+  validate_workflows:
+    name: Validate workflows
+    steps:
+      - uses: ./.eas/functions/setup
+      # Offline structural check: dangling job references, invented job types
+      # or params, invalid trigger keys, file size. Runs without an EAS project.
+      - name: Structure
+        run: npm run validate:workflows
+      # The authoritative schema check. This is what caught `type: slack`,
+      # the `description` key on function inputs, and an interpolated
+      # rollout_percentage — none of which the offline pass could know about.
+      - name: Schema
+        run: |
+          for file in .eas/workflows/*.yml; do
+            npx eas-cli@latest workflow:validate "$file"
+          done
+
+  report:
+    name: Report to PR
+    # `after:` rather than `needs:` — a summary comment that only posts when
+    # everything passed is a summary comment nobody needs.
+    after: [typecheck, lint, unit_tests, validate_workflows]
+    type: github-comment
+    params:
+      message: 'Static checks and unit tests'
+      # Explicitly empty: this workflow produces no builds, updates or
+      # deployments, and the default behaviour is to attach all of them.
+      build_ids: []
+      update_group_ids: []

@@ -1,0 +1,73 @@
+# Journey 3 — the unhappy paths at the till. Two things must hold on a real
+# device: a bad form never reaches the payment API, and a declined card leaves
+# the basket intact so the customer can try another card.
+appId: com.example.brewline
+tags:
+  - critical
+---
+- launchApp:
+    clearState: true
+
+- runFlow: ../subflows/add-two-espressos.yaml
+- tapOn:
+    id: 'go-to-checkout'
+
+# Paying with an empty form surfaces every error and stays on the screen.
+- tapOn:
+    id: 'pay-button'
+- assertVisible:
+    id: 'field-name-error'
+- assertVisible:
+    id: 'field-email-error'
+- assertVisible:
+    id: 'field-card-error'
+- assertVisible:
+    id: 'field-expiry-error'
+- assertVisible:
+    id: 'field-cvc-error'
+- assertVisible:
+    id: 'checkout-total'
+
+# A card that fails the Luhn check is caught before any network call.
+- tapOn:
+    id: 'field-card'
+- inputText: '4242424242424224'
+- hideKeyboard
+- assertVisible:
+    id: 'field-card-error'
+    text: 'Check your card number'
+
+# Now a well-formed card that the processor refuses (test card ending 0002).
+- tapOn:
+    id: 'field-name'
+- inputText: 'Karim M'
+- tapOn:
+    id: 'field-email'
+- inputText: 'karim@example.com'
+- eraseText
+- inputText: 'karim@example.com'
+- tapOn:
+    id: 'field-card'
+- eraseText
+- inputText: '4000000000000002'
+- tapOn:
+    id: 'field-expiry'
+- inputText: '1230'
+- tapOn:
+    id: 'field-cvc'
+- inputText: '123'
+- hideKeyboard
+
+- tapOn:
+    id: 'pay-button'
+- assertVisible:
+    id: 'payment-error'
+    text: 'Your card was declined. Try a different card.'
+- assertNotVisible:
+    id: 'order-confirmed'
+
+# The basket survived the decline.
+- back
+- assertVisible:
+    id: 'total-due'
+    text: '£27.79'

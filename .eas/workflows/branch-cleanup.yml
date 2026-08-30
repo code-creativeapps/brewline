@@ -1,0 +1,24 @@
+name: Branch cleanup
+
+# EAS Update branches outlive the git branches that created them. Left alone,
+# the branch list fills with dead feature branches and it stops being possible
+# to tell at a glance which channels are real.
+#
+# `ref_delete` fires on branch deletion. Note the negation syntax, and that
+# workflow files are read from the DEFAULT BRANCH HEAD at the time of deletion —
+# not from the branch being deleted, which no longer exists.
+on:
+  ref_delete:
+    branches:
+      - '**'
+      - '!main'
+
+jobs:
+  delete_update_branch:
+    name: Delete the matching EAS Update branch
+    type: branch-delete
+    params:
+      branch_name: ${{ github.ref_name }}
+      # Most branches never published an update, so a missing EAS branch is the
+      # normal case, not an error.
+      fail_on_missing: false
