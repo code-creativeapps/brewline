@@ -78,11 +78,25 @@ jobs:
       # The authoritative schema check. This is what caught `type: slack`,
       # the `description` key on function inputs, and an interpolated
       # rollout_percentage — none of which the offline pass could know about.
+      #
+      # `type: maestro` jobs validate fine but then fail an ENTITLEMENT check on
+      # a free plan. That is a billing state, not a broken workflow, so it must
+      # not fail the build — while every genuine schema error still does.
       - name: Schema
         run: |
+          status=0
           for file in .eas/workflows/*.yml; do
-            npx eas-cli@latest workflow:validate "$file"
+            if out=$(npx eas-cli@latest workflow:validate "$file" 2>&1); then
+              echo "✔ $file"
+            elif printf '%s' "$out" | grep -q 'requires a paid plan'; then
+              echo "• $file — schema OK; maestro jobs need a paid plan"
+            else
+              echo "✖ $file"
+              printf '%s\n' "$out"
+              status=1
+            fi
           done
+          exit $status
 
   report:
     name: Report to PR
